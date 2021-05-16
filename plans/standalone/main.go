@@ -1,103 +1,60 @@
+// Copyright 2021 Burak Sezer
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package main
 
 import (
 	"context"
 	"fmt"
 	"net"
-	"os"
-	"reflect"
 	"time"
 
-	"github.com/buraksezer/olric-testground-plans/sdks/network"
-	"github.com/buraksezer/olric"
-	"github.com/buraksezer/olric/config"
+	"github.com/testground/sdk-go/network"
 	"github.com/testground/sdk-go/run"
 	"github.com/testground/sdk-go/runtime"
+	"github.com/testground/sdk-go/sync"
 )
 
-func main() {
-	run.Invoke(runf)
+var testcases = map[string]interface{}{
+	"DMapGetPut":    DMapGetPut,
+	"DMapPutDelete": DMapPutDelete,
+	"DMapPutEx":     DMapPutEx,
+	"DMapPutIf":     DMapPutIf,
 }
 
+func toKey(i int) string {
+	return fmt.Sprintf("%09d", i)
+}
 
-func runf(runenv *runtime.RunEnv, initCtx *run.InitContext) error {
-	netcfg, err := network.New(runenv, initCtx)
-	if err != nil {
-		runenv.RecordCrash(err)
-		return err
-	}
+func toVal(i int) []byte {
+	return []byte(fmt.Sprintf("%010d", i))
+}
 
-	// Deployment scenario: embedded-member
-	// This creates a single-node Olric cluster. It's good enough for experimenting.
-
-	// config.New returns a new config.Config with sane defaults. Available values for env:
-	// local, lan, wan
-	c := config.New("lan")
-	c.LogOutput = os.Stdout
-	c.BindAddr = append(netcfg.IPv4.IP[:3:3], 1).String()
-	c.MemberlistConfig.BindAddr = c.BindAddr
-
-	// Callback function. It's called when this node is ready to accept connections.
-	ctx, cancel := context.WithCancel(context.Background())
-	c.Started = func() {
-		defer cancel()
-
-		runenv.RecordMessage("Olric is ready to accept connections!")
-	}
-
-	db, err := olric.New(c)
-	if err != nil {
-		runenv.RecordCrash(fmt.Sprintf("failed to create Olric instance: %v", err))
-		return err
-	}
-
-	go func() {
-		// Call Start at background. It's a blocker call.
-		err = db.Start()
-		if err != nil {
-			runenv.RecordCrash(fmt.Sprintf("olric.Start returned an error: %v", err))
-		}
-	}()
-
-	<-ctx.Done()
-
-	dm, err := db.NewDMap("bucket-of-arbitrary-items")
-	if err != nil {
-		runenv.RecordCrash(fmt.Sprintf("olric.NewDMap returned an error: %v", err))
-		return err
-	}
-
-	// Magic starts here!
-	runenv.RecordMessage("##")
-	runenv.RecordMessage("Operations on a DMap instance:")
-	err = dm.Put("string-key", "buraksezer")
-	if err != nil {
-		runenv.RecordCrash(fmt.Sprintf("Failed to call Put: %v", err))
-		return err
-	}
-	stringValue, err := dm.Get("string-key")
-	if err != nil {
-		runenv.RecordCrash(fmt.Sprintf("Failed to call Get: %v", err))
-		return err
-	}
-	fmt.Printf("Value for string-key: %v, reflect.TypeOf: %s\n", stringValue, reflect.TypeOf(stringValue))
-
-	err = dm.Put("uint64-key", uint64(1988))
-	if err != nil {
-		runenv.RecordCrash(fmt.Sprintf("Failed to call Put: %v", err))
-		return err
-	}
-	uint64Value, err := dm.Get("uint64-key")
-	if err != nil {
-		runenv.RecordCrash(fmt.Sprintf("Failed to call Get: %v", err))
-		return err
-	}
-	fmt.Printf("Value for uint64-key: %v, reflect.TypeOf: %s\n", uint64Value, reflect.TypeOf(uint64Value))
-	runenv.RecordMessage("##")
-
-	// Don't forget the call Shutdown when you want to leave the cluster.
-	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+func getIPAddress(r *runtime.RunEnv) (net.IP, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	return db.Shutdown(ctx)
+	if !r.TestSidecar {
+		return nil, fmt.Errorf("this plan must be run with sidecar enabled")
+	}
+
+	client := sync.MustBoundClient(ctx, r)
+	netclient := network.NewClient(client, r)
+	netclient.MustWaitNetworkInitialized(ctx)
+	return netclient.MustGetDataNetworkIP(), nil
+}
+
+func main() {
+	run.InvokeMap(testcases)
 }
